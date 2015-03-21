@@ -8,7 +8,7 @@ though.
 
 ## Installation
 
-    $ sudo apt-get install libdbd-sqlite3-perl
+    $ sudo apt-get install libdbd-sqlite3-perl libjson-xs-perl
     $ cd bida-prototype/
     $ git submodule init; git submodule update
 
