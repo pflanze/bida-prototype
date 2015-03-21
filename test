@@ -1,0 +1,16 @@
+#!/bin/bash
+
+rm -rf .test-data
+
+./bida test_config.pl &
+
+sleep 1
+
+netcat -q1 localhost 1239 < test-in > test.out
+
+if cmp test.out test-out; then
+    echo "Test: success."
+else
+    echo "Test: failure."
+fi
+

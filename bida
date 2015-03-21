@@ -1,0 +1,319 @@
+#!/usr/bin/perl -w
+
+# Wed Mar 18 23:31:16 CET 2015
+(my $email='ch%christianjaeger,ch')=~ tr/%,/@./;
+
+use strict; use warnings FATAL => 'uninitialized'; use utf8;
+
+use Cwd 'abs_path';
+our ($mydir, $myname);
+BEGIN {
+    my $location= (-l $0) ? abs_path ($0) : $0;
+    $location=~ /(.*?)([^\/]+?)_?\z/s or die "?";
+    ($mydir, $myname)=($1,$2);
+    $mydir= $ENV{ML2JSON_MYDIR} if $ENV{ML2JSON_MYDIR};
+}
+
+use lib "$mydir/functional-perl/lib"; ## only using repl, xperlfunc, HashSet
+
+
+our $default_config_path= "$mydir/default_config.pl";
+
+
+sub usage {
+    print STDERR map{"$_\n"} @_ if @_;
+    print "$myname path/to/config.pl
+
+  (Christian Jaeger <$email>)
+";
+exit (@_ ? 1 : 0);
+}
+
+use Getopt::Long;
+our $verbose=0;
+#our $opt_dry;
+GetOptions("verbose"=> \$verbose,
+	   "help"=> sub{usage},
+	   #"dry-run"=> \$opt_dry,
+	   ) or exit 1;
+usage unless @ARGV==1;
+
+our ($config_path)=@ARGV;
+
+use Chj::FP::HashSet ":all"; # XXX aha and that one
+
+
+our $config=
+  hashset_union_defined(scalar require $config_path,
+			scalar require $default_config_path);
+
+use Hash::Util 'lock_hash'; lock_hash %$config;
+
+
+# === data store ============================================
+
+mkdir $$config{data_base}, 0700;
+
+our $dbfile= "$$config{data_base}/db.sqlite";
+
+our $exists= -f $dbfile;
+
+use DBI;
+
+sub open_connection {
+    DBI->connect("dbi:SQLite:dbname=$dbfile","","")
+}
+
+unless ($exists) {
+    my $db= open_connection;
+    $db->do("create table object (oid INTEGER PRIMARY KEY, val STRING)");
+    $db->do("create table indexx (indexname STRING KEY, key STRING KEY, oid INTEGER KEY)");
+}
+
+our @on_connect;
+sub Prepare ($$) {
+    my ($ref,$stm)=@_;
+    push @on_connect, [@_];
+}
+sub RunPrepares ($) {
+    my ($db)=@_;
+    for (@on_connect) {
+	my ($ref,$stm)=@$_;
+	$$ref= $db->prepare($stm);
+    }
+}
+
+Prepare( \ (our $object_get),
+	 "select val from object where oid=?");
+
+sub object_get ($) {
+    my ($oid)=@_;
+    $object_get->execute($oid);
+    if (my ($val)= $object_get->fetchrow_array) {
+	if ($object_get->fetchrow_array) {
+	    die "bug";
+	} else {
+	    $val
+	}
+    } else {
+	()
+    }
+}
+
+Prepare( \ (our $object_put),
+	 "insert into object values(NULL,?)");
+
+our $db; # need it directly now, anyway
+
+sub object_put ($) {
+    my ($val)=@_;
+    $object_put->execute($val);
+    $db->sqlite_last_insert_rowid
+}
+
+Prepare( \ (our $object_delete),
+	 "delete from object where oid=?");
+
+sub object_delete ($) {
+    my ($oid)=@_;
+    $object_delete->execute($oid);
+}
+
+
+Prepare( \ (our $index_add),
+	 "insert into indexx values(?,?,?)");
+
+sub index_add ($$$) {
+    my ($indexname,$key,$oid)=@_;
+    $index_add->execute($indexname,$key,$oid);
+    ()
+}
+
+Prepare( \ (our $index_remove),
+    "delete from indexx where indexname=? and key=? and oid=?");
+
+sub index_remove ($$$) {
+    my ($indexname,$key,$oid)=@_;
+    $index_remove->execute($indexname,$key,$oid);
+    ()
+}
+
+Prepare( \ (our $index_entries),
+	 "select oid from indexx where indexname=? and key=?");
+
+sub index_entries ($$) {
+    my ($indexname,$key)=@_;
+    $index_entries->execute($indexname,$key);
+    my @oid;
+    while (my ($oid)= $index_entries->fetchrow) {
+	push @oid,$oid
+    }
+    \@oid
+}
+
+
+
+# === command loop ============================================
+
+use JSON;
+
+sub process_indexnames_and_keys {
+    my ($process, $indexnames_and_keys, $oid)=@_;
+    for (@$indexnames_and_keys) {
+	@$_ >= 1
+	    or die "indexnames_and_keys must be an array of [indexname, keys...]";
+	my ($indexname,@keys)=@$_;
+	for my $key (@keys) {
+	    &$process ($indexname, $key, $oid);
+	}
+    }
+}
+
+sub respond_string ($$) {
+    my ($conn,$str)=@_;
+    $conn->send($str."\n")
+	or die "could not send response: $!"
+}
+
+sub respond ($$) {
+    my ($conn,$msg)=@_;
+    respond_string($conn, encode_json ($msg))
+}
+
+sub serve_connection {
+    my ($conn)=@_;
+    while (<$conn>) {
+	eval {
+	    my $msg= decode_json $_;
+	    my ($cmd,@args)= @$msg;
+
+	    if ($cmd eq "get") {
+		@args==1
+		    or die "'get' needs 1 argument: oid";
+		my ($oid)= @args;
+		# To avoid decoding and re-encoding the value,
+		# passing it through directly. This is ONLY safe iff
+		# the saving always encodes as json, as is currently
+		# the case (see under "save" below).
+		if (my ($str)= object_get($oid)) {
+		    respond_string $conn, '["VALUE", '.$str.']';
+		} else {
+		    respond_string $conn, '["NOTFOUND"]';
+		}
+	    }
+
+	    elsif ($cmd eq "save") {
+		@args==2
+		    or die "'save' needs 2 arguments: indexnames_and_keys, value";
+		my ($indexnames_and_keys,$value)= @args;
+		my $oid= object_put encode_json($value);
+		process_indexnames_and_keys(\&index_add, $indexnames_and_keys, $oid);
+		respond $conn, ["OID", $oid];
+	    }
+
+	    elsif ($cmd eq "delete") {
+		@args==2
+		    or die "'delete' needs 2 arguments: indexnames_and_keys, oid";
+		my ($indexnames_and_keys,$oid)= @args;
+		process_indexnames_and_keys(\&index_remove, $indexnames_and_keys, $oid);
+		object_delete $oid;
+		respond $conn, ["OK"];
+	    }
+
+	    elsif ($cmd eq "list") {
+		@args==2
+		    or die "'list' needs 2 arguments: indexname, key";
+		my ($indexname,$key)= @args;
+		respond $conn, ["OIDS", index_entries ($indexname,$key)];
+	    }
+
+	    else {
+		die "unknown command: $cmd"
+	    }
+	    
+	    1
+	} || do {
+	    respond $conn, ["ERROR", "$@" ];
+	}
+    }
+}
+
+
+# === networking ============================================
+
+use Chj::load;
+use Chj::xperlfunc;
+use POSIX 'EINTR';
+
+
+our ($use_inet, $socketpath)= do {
+    if (exists $$config{listenaddress}) {
+	die "both listenaddress and socket_base specified"
+	    if exists $$config{socket_base};
+	(1, $$config{listenaddress})
+    } else {
+	if (exists $$config{socket_base}) {
+	    (0, "$$config{socket_base}/socket")
+	} else {
+	    die "neither listenaddress nor socket_base specified";
+        }
+    }
+};
+
+our $IO_Socket_class= $use_inet ? "IO::Socket::INET" : "IO::Socket::UNIX";
+
+load $IO_Socket_class; import $IO_Socket_class;
+
+
+unlink $socketpath # okay?  check for running daemons...
+  unless $use_inet;
+
+our $socket= $IO_Socket_class->new
+  (
+   Type=> &SOCK_STREAM,
+   $use_inet ? (LocalAddr=> $socketpath) : (Local=> $socketpath),
+   $use_inet ? (Proto=> "tcp") : (),
+   (Listen=> 1),  # ?
+   $use_inet ? (ReuseAddr=> 1) : (),
+  )
+  or die "opening socket '$socketpath': $!";#!
+
+
+use POSIX ":sys_wait_h"; # WNOHANG
+
+# XX or simply DROP/IGNORE ? 
+$SIG{CHLD}= do {
+    my $pid;
+    sub {
+	while (1) {
+	    $pid= waitpid -1,WNOHANG;
+	    last if (($pid == -1) or ($pid == 0)); #GRR somehow mis documented??!
+	}
+    };
+};
+
+#use Chj::ruse;
+#use Chj::Backtrace; use Chj::repl; repl;
+
+while(1) {
+    my $conn= $socket->accept
+	or do {
+	    if ($! == EINTR) {
+		# Interrupted system call
+		redo
+	    } else {
+		die "accept: $!";
+	}
+    };
+    warn "got connection from ".$conn->peername
+	if $verbose; # XX convert to a human-readable string
+    if (my $pid= xfork) {
+	# continue
+    } else {
+	$db=open_connection;
+	RunPrepares($db);
+	serve_connection $conn;
+	exit 0;
+    }
+}
+

@@ -1,0 +1,5 @@
+["save", [["name","Jaeger"]], ["Christian", "Jaeger"]]
+["get", 1]
+["list", "name", "Jaeger"]
+["delete", [["name","Jaeger"]], 1]
+["list", "name", "Jaeger"]
