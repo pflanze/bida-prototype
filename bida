@@ -15,6 +15,7 @@ BEGIN {
 }
 
 use lib "$mydir/functional-perl/lib"; ## only using repl, xperlfunc, HashSet
+use lib "$mydir/lib"; # load.pm
 
 
 our $default_config_path= "$mydir/default_config.pl";
