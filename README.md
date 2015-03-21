@@ -1,6 +1,6 @@
 This is a prototype for the bida database.
 
-It is written in Perl and uses the Berkeley key-value Database as
+It is written in Perl and uses the Sqlite3 database as
 storage backend. The purpose of this implementation is to develop the
 database API before caring for a more efficient implementation.
 The database API is developed with the latter implementation in mind,
@@ -38,4 +38,9 @@ which outputs `["OK"]`
     ["list", "name", "Jaeger"]
 
 which outputs `["OIDS",[]]`
+
+To see the current state of the database, it can be dumped using:
+
+    $ sqlite3 .tmp-data/db.sqlite
+    sqlite> .dump
 
