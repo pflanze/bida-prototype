@@ -44,3 +44,7 @@ To see the current state of the database, it can be dumped using:
     $ sqlite3 .tmp-data/db.sqlite
     sqlite> .dump
 
+To run the tests (currently simply the above):
+
+    $ ./test
+
